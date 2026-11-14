@@ -853,6 +853,7 @@ def resolve_place_coordinates(place_str: str):
     return None
 
 @app.post("/api/kundali")
+@app.post("/kundali")
 def generate_kundali(data: BirthInput):
     coords = resolve_place_coordinates(data.place)
     if not coords:
@@ -962,6 +963,7 @@ def generate_kundali(data: BirthInput):
     return payload
 
 @app.post("/api/dasha-sublevels")
+@app.post("/dasha-sublevels")
 def expand_dasha_level(req: DashaExpandRequest):
     if req.level < 1 or req.level >= 6:
         raise HTTPException(status_code=400, detail="Deha Dasha (Level 6) is the deepest level.")
@@ -981,6 +983,7 @@ def expand_dasha_level(req: DashaExpandRequest):
     return {"level": next_level, "level_name": DASHA_LEVEL_NAMES[next_level - 1], "periods": children}
 
 @app.post("/api/transit")
+@app.post("/transit")
 def calculate_custom_transit(req: TransitRequest):
     meta = req.natal_meta
     if not meta and req.session_id:
@@ -1034,6 +1037,7 @@ def calculate_custom_transit(req: TransitRequest):
     }
 
 @app.post("/api/ask-astrologer")
+@app.post("/ask-astrologer")
 def ask_agentic_astrologer(req: AgentQuery):
     stored = req.context_data
     if not stored and req.session_id:
