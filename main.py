@@ -15,10 +15,31 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from geopy.geocoders import Nominatim
-from timezonefinder import TimezoneFinder
 from google import genai
 from google.genai import types
+
+try:
+    from geopy.geocoders import Nominatim
+    geolocator = Nominatim(user_agent="vedic_kundali_vercel_v5")
+except Exception:
+    geolocator = None
+
+try:
+    from timezonefinder import TimezoneFinder
+    tf = TimezoneFinder()
+except Exception:
+    tf = None
+
+def get_timezone_name(lat: float, lon: float) -> str:
+    # Fast coordinate bounding box for India (IST)
+    if 6.0 <= lat <= 37.5 and 68.0 <= lon <= 97.5:
+        return "Asia/Kolkata"
+    if tf is not None:
+        try:
+            return tf.timezone_at(lat=lat, lng=lon) or "Asia/Kolkata"
+        except Exception:
+            pass
+    return "Asia/Kolkata"
 
 # Optional Swiss Ephemeris import with pure-python fallback via jyotishganit
 try:
@@ -47,8 +68,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-geolocator = Nominatim(user_agent="vedic_kundali_desktop_v4")
-tf = TimezoneFinder()
 api_key = os.environ.get("GEMINI_API_KEY", "")
 ai_client = genai.Client(api_key=api_key) if api_key else None
 
@@ -843,124 +862,131 @@ def resolve_place_coordinates(place_str: str):
         pass
 
     # Fallback 2: Geopy Nominatim
-    try:
-        loc = geolocator.geocode(place_str, timeout=6)
-        if loc:
-            return loc.latitude, loc.longitude, loc.address
-    except Exception:
-        pass
+    if geolocator is not None:
+        try:
+            loc = geolocator.geocode(place_str, timeout=6)
+            if loc:
+                return loc.latitude, loc.longitude, loc.address
+        except Exception:
+            pass
 
     return None
 
 @app.post("/api/kundali")
 @app.post("/kundali")
 def generate_kundali(data: BirthInput):
-    coords = resolve_place_coordinates(data.place)
-    if not coords:
-        raise HTTPException(status_code=400, detail=f"Could not resolve coordinates for '{data.place}'.")
-    lat, lon, resolved_address = coords
-    tz_name = tf.timezone_at(lat=lat, lng=lon) or "Asia/Kolkata"
-    local_tz = pytz.timezone(tz_name)
+    try:
+        coords = resolve_place_coordinates(data.place)
+        if not coords:
+            raise HTTPException(status_code=400, detail=f"Could not resolve coordinates for '{data.place}'.")
+        lat, lon, resolved_address = coords
+        tz_name = get_timezone_name(lat, lon)
+        local_tz = pytz.timezone(tz_name)
 
-    naive_dt = datetime.strptime(f"{data.dob} {data.tob}", "%Y-%m-%d %H:%M")
-    local_dt = local_tz.localize(naive_dt)
-    utc_dt = local_dt.astimezone(pytz.utc)
+        naive_dt = datetime.strptime(f"{data.dob} {data.tob}", "%Y-%m-%d %H:%M")
+        local_dt = local_tz.localize(naive_dt)
+        utc_dt = local_dt.astimezone(pytz.utc)
 
-    natal_snap = calculate_sidereal_snapshot(utc_dt, lat, lon)
-    moon_abs_deg = natal_snap["raw_planets"]["Moon"]["abs_deg"]
-    natal_moon_sign = int(moon_abs_deg // 30.0) + 1
-    _, moon_nak_name, _, moon_pada = get_nakshatra_info(moon_abs_deg)
+        natal_snap = calculate_sidereal_snapshot(utc_dt, lat, lon)
+        moon_abs_deg = natal_snap["raw_planets"]["Moon"]["abs_deg"]
+        natal_moon_sign = int(moon_abs_deg // 30.0) + 1
+        _, moon_nak_name, _, moon_pada = get_nakshatra_info(moon_abs_deg)
 
-    dasha_timeline = calculate_vimshottari_dasha(moon_abs_deg, naive_dt)
-    now_local = datetime.now(local_tz).replace(tzinfo=None)
-    active_dasha_chain = build_active_dasha_chain(dasha_timeline, now_local)
+        dasha_timeline = calculate_vimshottari_dasha(moon_abs_deg, naive_dt)
+        now_local = datetime.now(local_tz).replace(tzinfo=None)
+        active_dasha_chain = build_active_dasha_chain(dasha_timeline, now_local)
 
-    # Extract active MD, AD, PD, SD lords (up to Sookshma Dasha)
-    active_dasha_4 = [c["active_lord"] for c in active_dasha_chain[:4]]
+        # Extract active MD, AD, PD, SD lords (up to Sookshma Dasha)
+        active_dasha_4 = [c["active_lord"] for c in active_dasha_chain[:4]]
 
-    now_utc = datetime.now(pytz.utc)
-    delhi_snap = calculate_sidereal_snapshot(now_utc, 28.6139, 77.2090)
-    transit_signs = {p: int(info["abs_deg"] // 30.0) + 1 for p, info in delhi_snap["raw_planets"].items()}
+        now_utc = datetime.now(pytz.utc)
+        delhi_snap = calculate_sidereal_snapshot(now_utc, 28.6139, 77.2090)
+        transit_signs = {p: int(info["abs_deg"] // 30.0) + 1 for p, info in delhi_snap["raw_planets"].items()}
 
-    d9_signs = {p: compute_varga_sign(info["abs_deg"], 9) for p, info in natal_snap["raw_planets"].items()}
+        d9_signs = {p: compute_varga_sign(info["abs_deg"], 9) for p, info in natal_snap["raw_planets"].items()}
 
-    varga_list = [1, 9, 2, 3, 4, 7, 10, 12, 16, 20, 24, 27, 30, 40, 45, 60]
-    all_vargas, all_chart_insights, d1_planet_table = {}, {}, []
+        varga_list = [1, 9, 2, 3, 4, 7, 10, 12, 16, 20, 24, 27, 30, 40, 45, 60]
+        all_vargas, all_chart_insights, d1_planet_table = {}, {}, []
 
-    for v in varga_list:
-        key = f"D{v}"
-        v_chart, v_planets, v_insights = build_varga_chart_and_insights(
-            natal_snap, v, d9_signs, active_dasha_4, transit_signs
+        for v in varga_list:
+            key = f"D{v}"
+            v_chart, v_planets, v_insights = build_varga_chart_and_insights(
+                natal_snap, v, d9_signs, active_dasha_4, transit_signs
+            )
+            all_vargas[key] = v_chart
+            all_chart_insights[key] = v_insights
+            if v == 1:
+                d1_planet_table = v_planets
+
+        d1_asc_sign = natal_snap["asc_sign"]
+        planet_classifications = build_planetary_classification(d1_asc_sign, d1_planet_table, active_dasha_4)
+
+        delhi_transit_chart, delhi_transit_table, delhi_transit_insights = build_varga_chart_and_insights(
+            delhi_snap, 1, d9_signs, active_dasha_4, transit_signs
         )
-        all_vargas[key] = v_chart
-        all_chart_insights[key] = v_insights
-        if v == 1:
-            d1_planet_table = v_planets
+        asc_transit_chart, _, asc_transit_insights = build_varga_chart_and_insights(
+            delhi_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=d1_asc_sign
+        )
+        moon_transit_chart, _, moon_transit_insights = build_varga_chart_and_insights(
+            delhi_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=natal_moon_sign
+        )
 
-    d1_asc_sign = natal_snap["asc_sign"]
-    planet_classifications = build_planetary_classification(d1_asc_sign, d1_planet_table, active_dasha_4)
+        all_chart_insights["TRANSIT_DELHI"] = delhi_transit_insights
+        all_chart_insights["TRANSIT_ASC"] = asc_transit_insights
+        all_chart_insights["TRANSIT_MOON"] = moon_transit_insights
 
-    delhi_transit_chart, delhi_transit_table, delhi_transit_insights = build_varga_chart_and_insights(
-        delhi_snap, 1, d9_signs, active_dasha_4, transit_signs
-    )
-    asc_transit_chart, _, asc_transit_insights = build_varga_chart_and_insights(
-        delhi_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=d1_asc_sign
-    )
-    moon_transit_chart, _, moon_transit_insights = build_varga_chart_and_insights(
-        delhi_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=natal_moon_sign
-    )
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist_tz)
 
-    all_chart_insights["TRANSIT_DELHI"] = delhi_transit_insights
-    all_chart_insights["TRANSIT_ASC"] = asc_transit_insights
-    all_chart_insights["TRANSIT_MOON"] = moon_transit_insights
+        sookshma_summary = f"{active_dasha_4[0]} MD / {active_dasha_4[1]} AD / {active_dasha_4[2]} PD / {active_dasha_4[3]} SD"
 
-    ist_tz = pytz.timezone("Asia/Kolkata")
-    now_ist = datetime.now(ist_tz)
+        payload = {
+            "profile": {
+                "name": data.name,
+                "dob": data.dob,
+                "tob": data.tob,
+                "place": resolved_address,
+                "timezone": tz_name,
+                "ascendant": f"{ZODIAC_SIGNS[d1_asc_sign - 1]} (Lord: {SIGN_LORDS[d1_asc_sign]})",
+                "moon_sign": f"{ZODIAC_SIGNS[natal_moon_sign - 1]} (Lord: {SIGN_LORDS[natal_moon_sign]}) — {moon_nak_name} P{moon_pada}",
+                "running_dasha": sookshma_summary,
+                "current_dasha": sookshma_summary
+            },
+            "charts": all_vargas,
+            "chart_insights": all_chart_insights,
+            "house_insights": all_chart_insights.get("D1", {}),
+            "planet_table": d1_planet_table,
+            "planet_classifications": planet_classifications,
+            "planets_page": {"table": planet_classifications},
+            "transit": {
+                "timestamp": now_ist.strftime("%Y-%m-%d %H:%M IST"),
+                "delhi_asc": f"{ZODIAC_SIGNS[delhi_snap['asc_sign'] - 1]} (New Delhi Lagna)",
+                "delhi_chart": delhi_transit_chart,
+                "chart": asc_transit_chart,
+                "asc_chart": asc_transit_chart,
+                "moon_chart": moon_transit_chart,
+                "moon_transit_chart": moon_transit_chart,
+                "table": delhi_transit_table
+            },
+            "dasha": dasha_timeline,
+            "active_dasha_chain": active_dasha_chain,
+            "dasha_chain": active_dasha_chain
+        }
 
-    sookshma_summary = f"{active_dasha_4[0]} MD / {active_dasha_4[1]} AD / {active_dasha_4[2]} PD / {active_dasha_4[3]} SD"
+        payload["natal_meta"] = {
+            "d1_asc_sign": d1_asc_sign,
+            "natal_moon_sign": natal_moon_sign,
+            "d9_signs": d9_signs,
+            "active_dasha_4": active_dasha_4
+        }
 
-    payload = {
-        "profile": {
-            "name": data.name,
-            "dob": data.dob,
-            "tob": data.tob,
-            "place": resolved_address,
-            "timezone": tz_name,
-            "ascendant": f"{ZODIAC_SIGNS[d1_asc_sign - 1]} (Lord: {SIGN_LORDS[d1_asc_sign]})",
-            "moon_sign": f"{ZODIAC_SIGNS[natal_moon_sign - 1]} (Lord: {SIGN_LORDS[natal_moon_sign]}) — {moon_nak_name} P{moon_pada}",
-            "running_dasha": sookshma_summary,
-            "current_dasha": sookshma_summary
-        },
-        "charts": all_vargas,
-        "chart_insights": all_chart_insights,
-        "house_insights": all_chart_insights.get("D1", {}),
-        "planet_table": d1_planet_table,
-        "planet_classifications": planet_classifications,
-        "planets_page": {"table": planet_classifications},
-        "transit": {
-            "timestamp": now_ist.strftime("%Y-%m-%d %H:%M IST"),
-            "delhi_asc": f"{ZODIAC_SIGNS[delhi_snap['asc_sign'] - 1]} (New Delhi Lagna)",
-            "delhi_chart": delhi_transit_chart,
-            "chart": asc_transit_chart,
-            "asc_chart": asc_transit_chart,
-            "moon_chart": moon_transit_chart,
-            "moon_transit_chart": moon_transit_chart,
-            "table": delhi_transit_table
-        },
-        "dasha": dasha_timeline,
-        "active_dasha_chain": active_dasha_chain,
-        "dasha_chain": active_dasha_chain
-    }
-
-    payload["natal_meta"] = {
-        "d1_asc_sign": d1_asc_sign,
-        "natal_moon_sign": natal_moon_sign,
-        "d9_signs": d9_signs,
-        "active_dasha_4": active_dasha_4
-    }
-
-    CHART_STORE[data.name.lower()] = payload
-    return payload
+        CHART_STORE[data.name.lower()] = payload
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)} | {traceback.format_exc().splitlines()[-1]}")
 
 @app.post("/api/dasha-sublevels")
 @app.post("/dasha-sublevels")

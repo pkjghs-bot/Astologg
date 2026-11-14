@@ -1,7 +1,5 @@
 fastapi
 pysweph
-geopy
-timezonefinder
 pytz
 google-genai
 pydantic
