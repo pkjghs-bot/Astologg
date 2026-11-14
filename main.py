@@ -1,8 +1,13 @@
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import pytz
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -12,17 +17,23 @@ from timezonefinder import TimezoneFinder
 from google import genai
 from google.genai import types
 
-load_dotenv()
-
 # Optional Swiss Ephemeris import with pure-python fallback via jyotishganit
 try:
     import swisseph as swe
     HAS_SWISSEPH = True
     swe.set_sid_mode(swe.SIDM_LAHIRI, 0, 0)
 except ImportError:
-    swe = None
-    HAS_SWISSEPH = False
-    from jyotishganit import calculate_birth_chart
+    try:
+        import pysweph as swe
+        HAS_SWISSEPH = True
+        swe.set_sid_mode(swe.SIDM_LAHIRI, 0, 0)
+    except ImportError:
+        swe = None
+        HAS_SWISSEPH = False
+        try:
+            from jyotishganit import calculate_birth_chart
+        except ImportError:
+            calculate_birth_chart = None
 
 app = FastAPI(title="Astolog — Vedic Kundali & Agentic AI Engine")
 
@@ -197,13 +208,15 @@ class DashaExpandRequest(BaseModel):
 DashaSublevelsRequest = DashaExpandRequest
 
 class TransitRequest(BaseModel):
-    session_id: str
     transit_date: str  # YYYY-MM-DD
     transit_time: str  # HH:MM (24-hour IST)
+    natal_meta: Optional[dict] = None
+    session_id: Optional[str] = None
 
 class AgentQuery(BaseModel):
-    session_id: str
     question: str
+    context_data: Optional[dict] = None
+    session_id: Optional[str] = None
 
 def get_nakshatra_info(abs_deg: float):
     abs_deg = abs_deg % 360.0
@@ -772,29 +785,14 @@ def build_active_dasha_chain(mahadashas: List[dict], target_dt: datetime) -> Lis
     return chain
 
 @app.get("/")
-@app.get("/index-5")
-@app.get("/index-5.html")
-def serve_frontend_index5():
-    return FileResponse("index-5.html")
-
-@app.get("/index-4")
-@app.get("/index-4.html")
-def serve_frontend_index4():
-    return FileResponse("index-4.html")
-
-@app.get("/index-3")
-@app.get("/index-3.html")
-def serve_frontend_index3():
-    return FileResponse("index-3.html")
-
-@app.get("/index-1")
-@app.get("/index-1.html")
-def serve_frontend_index1():
-    return FileResponse("index-1.html")
-
 @app.get("/index")
 @app.get("/index.html")
-def serve_frontend_index():
+@app.get("/index-5")
+@app.get("/index-5.html")
+def serve_frontend():
+    for f in ["index.html", "index-5.html"]:
+        if os.path.exists(f):
+            return FileResponse(f)
     return FileResponse("index.html")
 
 @app.post("/api/kundali")
@@ -927,68 +925,76 @@ def expand_dasha_level(req: DashaExpandRequest):
     return {"level": next_level, "level_name": DASHA_LEVEL_NAMES[next_level - 1], "periods": children}
 
 @app.post("/api/transit")
-def get_custom_transit(req: TransitRequest):
-    session_key = req.session_id.lower()
-    if session_key not in CHART_STORE:
-        raise HTTPException(status_code=404, detail="Session not found. Please generate Kundali first.")
+def calculate_custom_transit(req: TransitRequest):
+    meta = req.natal_meta
+    if not meta and req.session_id:
+        stored = CHART_STORE.get(req.session_id.lower(), {})
+        meta = stored.get("natal_meta")
 
-    stored = CHART_STORE[session_key]
-    natal_meta = stored.get("natal_meta", {})
-    d1_asc_sign = natal_meta.get("d1_asc_sign", 1)
-    natal_moon_sign = natal_meta.get("natal_moon_sign", 1)
-    d9_signs = natal_meta.get("d9_signs", {})
-    active_dasha_4 = natal_meta.get("active_dasha_4", ["Sun", "Moon", "Mars", "Rahu"])
+    if not meta:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing natal metadata. Please generate Kundali first."
+        )
 
     try:
-        transit_dt = datetime.strptime(f"{req.transit_date} {req.transit_time}", "%Y-%m-%d %H:%M")
+        naive_target = datetime.strptime(f"{req.transit_date} {req.transit_time}", "%Y-%m-%d %H:%M")
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date or time format.")
+        raise HTTPException(status_code=400, detail="Invalid date or time format. Expected YYYY-MM-DD and HH:MM.")
 
     ist_tz = pytz.timezone("Asia/Kolkata")
-    local_transit_dt = ist_tz.localize(transit_dt)
-    utc_transit_dt = local_transit_dt.astimezone(pytz.utc)
+    ist_target = ist_tz.localize(naive_target)
+    utc_target = ist_target.astimezone(pytz.utc)
 
-    delhi_lat, delhi_lon = 28.6139, 77.2090
-    custom_snap = calculate_sidereal_snapshot(utc_transit_dt, delhi_lat, delhi_lon)
-    transit_signs = {p: int(info["abs_deg"] // 30.0) + 1 for p, info in custom_snap["raw_planets"].items()}
+    delhi_snap = calculate_sidereal_snapshot(utc_target, 28.6139, 77.2090)
+    transit_signs = {p: int(info["abs_deg"] // 30.0) + 1 for p, info in delhi_snap["raw_planets"].items()}
 
-    delhi_transit_chart, delhi_transit_table, delhi_transit_insights = build_varga_chart_and_insights(
-        custom_snap, 1, d9_signs, active_dasha_4, transit_signs
+    delhi_chart, delhi_table, delhi_insights = build_varga_chart_and_insights(
+        delhi_snap, 1, meta.get("d9_signs", {}), meta.get("active_dasha_4", ["Sun", "Moon", "Mars", "Jupiter"]), transit_signs
     )
-    asc_transit_chart, _, asc_transit_insights = build_varga_chart_and_insights(
-        custom_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=d1_asc_sign
+    asc_chart, _, asc_insights = build_varga_chart_and_insights(
+        delhi_snap, 1, meta.get("d9_signs", {}), meta.get("active_dasha_4", ["Sun", "Moon", "Mars", "Jupiter"]), transit_signs,
+        override_asc_sign=meta.get("d1_asc_sign", 1)
     )
-    moon_transit_chart, _, moon_transit_insights = build_varga_chart_and_insights(
-        custom_snap, 1, d9_signs, active_dasha_4, transit_signs, override_asc_sign=natal_moon_sign
+    moon_chart, _, moon_insights = build_varga_chart_and_insights(
+        delhi_snap, 1, meta.get("d9_signs", {}), meta.get("active_dasha_4", ["Sun", "Moon", "Mars", "Jupiter"]), transit_signs,
+        override_asc_sign=meta.get("natal_moon_sign", 1)
     )
 
-    result_transit = {
-        "timestamp": f"{req.transit_date} {req.transit_time} IST",
-        "delhi_asc": f"{ZODIAC_SIGNS[custom_snap['asc_sign'] - 1]} (New Delhi Lagna)",
-        "delhi_chart": delhi_transit_chart,
-        "chart": asc_transit_chart,
-        "asc_chart": asc_transit_chart,
-        "moon_chart": moon_transit_chart,
-        "moon_transit_chart": moon_transit_chart,
-        "table": delhi_transit_table
+    return {
+        "timestamp": ist_target.strftime("%Y-%m-%d %H:%M IST"),
+        "delhi_asc": f"{ZODIAC_SIGNS[delhi_snap['asc_sign'] - 1]} (New Delhi Lagna)",
+        "delhi_chart": delhi_chart,
+        "chart": asc_chart,
+        "asc_chart": asc_chart,
+        "moon_chart": moon_chart,
+        "moon_transit_chart": moon_chart,
+        "insights": {
+            "TRANSIT_DELHI": delhi_insights,
+            "TRANSIT_ASC": asc_insights,
+            "TRANSIT_MOON": moon_insights
+        },
+        "table": delhi_table
     }
-    return {"transit": result_transit}
 
 @app.post("/api/ask-astrologer")
 def ask_agentic_astrologer(req: AgentQuery):
-    session_key = req.session_id.lower()
-    if session_key not in CHART_STORE:
-        raise HTTPException(status_code=404, detail="Please generate the Kundali first.")
+    stored = req.context_data
+    if not stored and req.session_id:
+        stored = CHART_STORE.get(req.session_id.lower())
 
-    stored = CHART_STORE[session_key]
+    if not stored:
+        raise HTTPException(status_code=400, detail="Please generate the Kundali first.")
 
     def inspect_chart_house(chart_name: str, house_number: int) -> dict:
-        return sanitize_for_json(stored["chart_insights"].get(chart_name.upper(), {}).get(house_number, {}))
+        house_dict = stored.get("chart_insights", {}).get(chart_name.upper(), {})
+        data = house_dict.get(str(house_number)) or house_dict.get(int(house_number), {})
+        return sanitize_for_json(data)
 
     def get_planets_and_dasha() -> dict:
         return sanitize_for_json({
-            "profile": stored["profile"],
-            "classifications": stored["planet_classifications"]
+            "profile": stored.get("profile", {}),
+            "classifications": stored.get("planet_classifications", [])
         })
 
     client = ai_client
@@ -1004,6 +1010,8 @@ def ask_agentic_astrologer(req: AgentQuery):
     models_to_try = [
         os.environ.get("GEMINI_MODEL"),
         "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
         "gemini-3.5-flash",
         "gemini-3.8-flash"
     ]
@@ -1018,15 +1026,15 @@ def ask_agentic_astrologer(req: AgentQuery):
     last_error = None
     for model_name in candidate_models:
         try:
-            chat = client.chats.create(
+            response = client.models.generate_content(
                 model=model_name,
+                contents=req.question,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     tools=[inspect_chart_house, get_planets_and_dasha],
                     temperature=0.3,
                 ),
             )
-            response = chat.send_message(req.question)
             return {"analysis": response.text}
         except Exception as e:
             last_error = e

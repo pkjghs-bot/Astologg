@@ -739,25 +739,29 @@ function renderTransitSection(transit) {
 
 async function fetchCustomTransit() {
   if (!GLOBAL_KUNDALI_DATA) return alert("Please generate a Kundali first.");
-  const dateVal = document.getElementById("customTransitDate").value;
-  const timeVal = document.getElementById("customTransitTime").value;
-  if (!dateVal || !timeVal) return alert("Please select transit date and time.");
+  const tDate = document.getElementById("customTransitDate").value;
+  const tTime = document.getElementById("customTransitTime").value;
+  if (!tDate || !tTime) return alert("Please select transit date and time.");
 
   try {
-    const res = await fetch("http://localhost:8000/api/transit", {
+    const res = await fetch("/api/transit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        session_id: GLOBAL_KUNDALI_DATA.profile.name,
-        transit_date: dateVal,
-        transit_time: timeVal
+        natal_meta: GLOBAL_KUNDALI_DATA.natal_meta,
+        transit_date: tDate,
+        transit_time: tTime
       })
     });
-    const data = await res.json();
     if (res.ok) {
-      renderTransitSection(data.transit || data);
+      const transitData = await res.json();
+      if (transitData.insights && GLOBAL_KUNDALI_DATA.chart_insights) {
+        Object.assign(GLOBAL_KUNDALI_DATA.chart_insights, transitData.insights);
+      }
+      renderTransitSection(transitData);
     } else {
-      alert("Error: " + (data.detail || "Failed to calculate custom transit."));
+      const errData = await res.json().catch(() => ({}));
+      alert("Error: " + (errData.detail || "Failed to calculate custom transit."));
     }
   } catch (err) {
     alert("Network error: " + err.message);
@@ -1197,7 +1201,7 @@ function renderDashaColumn(level, title, periods, autoSelectActive = false) {
       if (level === 1 && p.antardashas) {
         renderDashaColumn(2, "2. Antardasha", p.antardashas, false);
       } else {
-        const res = await fetch("http://localhost:8000/api/dasha-sublevels", {
+        const res = await fetch("/api/dasha-sublevels", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1230,7 +1234,7 @@ document.getElementById("kundaliForm").addEventListener("submit", async (e) => {
     place: document.getElementById("place").value
   };
 
-  const res = await fetch("http://localhost:8000/api/kundali", {
+  const res = await fetch("/api/kundali", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -1320,18 +1324,30 @@ document.getElementById("kundaliForm").addEventListener("submit", async (e) => {
 });
 
 async function askAgent() {
-  const name = document.getElementById("name").value;
+  if (!GLOBAL_KUNDALI_DATA) return alert("Please generate a Kundali first.");
   const question = document.getElementById("aiQuestion").value;
+  if (!question) return alert("Please enter a question.");
   const box = document.getElementById("aiResponse");
   box.textContent = "AI Agent is analyzing Moon Sign, Sookshma Dasha, Yogakaraka, and D1/D9...";
 
-  const res = await fetch("http://localhost:8000/api/ask-astrologer", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: name, question: question })
-  });
-  const data = await res.json();
-  box.textContent = res.ok ? data.analysis : "Error: " + data.detail;
+  try {
+    const res = await fetch("/api/ask-astrologer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: question,
+        context_data: {
+          profile: GLOBAL_KUNDALI_DATA.profile,
+          planet_classifications: GLOBAL_KUNDALI_DATA.planet_classifications,
+          chart_insights: GLOBAL_KUNDALI_DATA.chart_insights
+        }
+      })
+    });
+    const data = await res.json();
+    box.textContent = res.ok ? data.analysis : "Error: " + (data.detail || "Request failed.");
+  } catch (err) {
+    box.textContent = "Error: " + err.message;
+  }
 }
 </script>
 </body>
