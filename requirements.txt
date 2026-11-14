@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+jyotishganit
+geopy
+timezonefinder
+pytz
+google-genai
+python-dotenv
