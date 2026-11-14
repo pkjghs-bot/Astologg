@@ -1,4 +1,7 @@
 import os
+import json
+import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import pytz
@@ -795,13 +798,66 @@ def serve_frontend():
             return FileResponse(f)
     return FileResponse("index.html")
 
+# Instant zero-network lookup for major Indian cities
+INDIA_CITIES = {
+    "patna": (25.5941, 85.1376, "Patna, Bihar, India"),
+    "new delhi": (28.6139, 77.2090, "New Delhi, Delhi, India"),
+    "delhi": (28.7041, 77.1025, "Delhi, India"),
+    "mumbai": (19.0760, 72.8777, "Mumbai, Maharashtra, India"),
+    "pune": (18.5204, 73.8567, "Pune, Maharashtra, India"),
+    "kolkata": (22.5726, 88.3639, "Kolkata, West Bengal, India"),
+    "bengaluru": (12.9716, 77.5946, "Bengaluru, Karnataka, India"),
+    "bangalore": (12.9716, 77.5946, "Bengaluru, Karnataka, India"),
+    "chennai": (13.0827, 80.2707, "Chennai, Tamil Nadu, India"),
+    "hyderabad": (17.3850, 78.4867, "Hyderabad, Telangana, India"),
+    "guwahati": (26.1445, 91.7362, "Guwahati, Assam, India"),
+    "silchar": (24.8333, 92.7789, "Silchar, Assam, India"),
+    "varanasi": (25.3176, 82.9739, "Varanasi, Uttar Pradesh, India"),
+    "lucknow": (26.8467, 80.9462, "Lucknow, Uttar Pradesh, India"),
+    "jaipur": (26.9124, 75.7873, "Jaipur, Rajasthan, India"),
+    "ahmedabad": (23.0225, 72.5714, "Ahmedabad, Gujarat, India"),
+    "ranchi": (23.3441, 85.3096, "Ranchi, Jharkhand, India"),
+    "bhopal": (23.2599, 77.4126, "Bhopal, Madhya Pradesh, India"),
+    "chandigarh": (30.7333, 76.7794, "Chandigarh, India"),
+    "bhubaneswar": (20.2961, 85.8245, "Bhubaneswar, Odisha, India"),
+}
+
+def resolve_place_coordinates(place_str: str):
+    cleaned = place_str.strip().lower()
+    city_key = cleaned.split(",")[0].strip()
+    if city_key in INDIA_CITIES:
+        return INDIA_CITIES[city_key]
+
+    # Fallback 1: Open-Meteo Geocoding API (Fast, free, never blocks Vercel/AWS IPs)
+    try:
+        q = urllib.parse.quote(city_key)
+        url = f"https://geocoding-api.open-meteo.com/v1/search?name={q}&count=1&language=en&format=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "AstologApp/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            if payload.get("results"):
+                r = payload["results"][0]
+                full_name = f"{r.get('name')}, {r.get('admin1', '')}, {r.get('country', '')}".replace(", ,", ",")
+                return float(r["latitude"]), float(r["longitude"]), full_name
+    except Exception:
+        pass
+
+    # Fallback 2: Geopy Nominatim
+    try:
+        loc = geolocator.geocode(place_str, timeout=6)
+        if loc:
+            return loc.latitude, loc.longitude, loc.address
+    except Exception:
+        pass
+
+    return None
+
 @app.post("/api/kundali")
 def generate_kundali(data: BirthInput):
-    location = geolocator.geocode(data.place)
-    if not location:
-        raise HTTPException(status_code=400, detail="Place of birth not found.")
-
-    lat, lon = location.latitude, location.longitude
+    coords = resolve_place_coordinates(data.place)
+    if not coords:
+        raise HTTPException(status_code=400, detail=f"Could not resolve coordinates for '{data.place}'.")
+    lat, lon, resolved_address = coords
     tz_name = tf.timezone_at(lat=lat, lng=lon) or "Asia/Kolkata"
     local_tz = pytz.timezone(tz_name)
 
@@ -867,7 +923,7 @@ def generate_kundali(data: BirthInput):
             "name": data.name,
             "dob": data.dob,
             "tob": data.tob,
-            "place": location.address,
+            "place": resolved_address,
             "timezone": tz_name,
             "ascendant": f"{ZODIAC_SIGNS[d1_asc_sign - 1]} (Lord: {SIGN_LORDS[d1_asc_sign]})",
             "moon_sign": f"{ZODIAC_SIGNS[natal_moon_sign - 1]} (Lord: {SIGN_LORDS[natal_moon_sign]}) — {moon_nak_name} P{moon_pada}",
